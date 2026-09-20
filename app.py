@@ -11,6 +11,7 @@ from flask_socketio import SocketIO, join_room, emit
 
 import bot_api as tg
 import game as G
+import store as S
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
@@ -20,10 +21,14 @@ NIGHT_SECONDS = int(os.environ.get("NIGHT_SECONDS", 45))
 VOTE_SECONDS = int(os.environ.get("VOTE_SECONDS", 45))
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+# "threading" rejimi eventlet'siz ishlaydi — Render'ning yangi Python
+# versiyalarida eventlet buziladigan muammolardan xoli, qo'shimcha
+# kutubxona ham kerak emas.
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 manager = G.GameManager()
 lock = threading.Lock()
+admin_state = {}  # admin_user_id -> "broadcast" | "channel"
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +47,112 @@ def validate_init_data(init_data: str):
         return json.loads(pairs.get("user", "{}"))
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Majburiy obuna
+# ---------------------------------------------------------------------------
+def is_subscribed(user_id):
+    channel = S.required_channel()
+    if not channel:
+        return True
+    data = tg.get_chat_member(channel, user_id)
+    if not data.get("ok"):
+        return True  # bot kanalda admin emas yoki xato — foydalanuvchini bloklamaymiz
+    status = data["result"].get("status")
+    return status in ("creator", "administrator", "member")
+
+
+def send_subscribe_prompt(chat_id):
+    channel = S.required_channel()
+    handle = channel if channel.startswith("@") else f"@{channel}"
+    tg.send_message(
+        chat_id,
+        "📌 Botdan foydalanish uchun avval quyidagi kanalga obuna bo'ling, "
+        "so'ng \"✅ Tekshirdim\" tugmasini bosing.",
+        reply_markup=tg.kb([
+            [tg.button("📢 Kanalga o'tish", url=f"https://t.me/{handle.lstrip('@')}")],
+            [tg.button("✅ Tekshirdim", callback_data="check_sub")],
+        ]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Admin panel
+# ---------------------------------------------------------------------------
+def admin_menu_keyboard():
+    return tg.kb([
+        [tg.button("📊 Statistika", callback_data="admin_stats")],
+        [tg.button("📢 Xabar yuborish", callback_data="admin_broadcast")],
+        [tg.button("📌 Majburiy kanal", callback_data="admin_channel")],
+        [tg.button("🎮 Faol o'yinlar", callback_data="admin_games")],
+    ])
+
+
+def handle_admin_command(chat_id):
+    tg.send_message(chat_id, "🛠 <b>Admin panel</b>", reply_markup=admin_menu_keyboard())
+
+
+def handle_admin_text(user_id, chat_id, text):
+    """Admin broadcast yoki kanal nomini matn sifatida yuborganda ishlaydi."""
+    state = admin_state.get(user_id)
+    if state == "broadcast":
+        admin_state.pop(user_id, None)
+        ids = S.all_user_ids()
+        sent, failed = 0, 0
+        for uid in ids:
+            res = tg.send_message(uid, text)
+            if res.get("ok"):
+                sent += 1
+            else:
+                failed += 1
+            time.sleep(0.05)  # Telegram flood-limitiga tegmaslik uchun
+        tg.send_message(chat_id, f"✅ Yuborildi: {sent} ta\n❌ Yetmadi: {failed} ta")
+        return True
+    if state == "channel":
+        admin_state.pop(user_id, None)
+        if text.strip().lower() in ("yo'q", "yoq", "-", "off", "bekor"):
+            S.set_setting("required_channel", "")
+            tg.send_message(chat_id, "Majburiy obuna o'chirildi.")
+        else:
+            S.set_setting("required_channel", text.strip())
+            tg.send_message(chat_id, f"Majburiy kanal o'rnatildi: {text.strip()}")
+        return True
+    return False
+
+
+def handle_admin_callback(cq_id, user_id, chat_id, data):
+    if data == "admin_stats":
+        tg.answer_callback(cq_id)
+        tg.send_message(
+            chat_id,
+            f"👥 Foydalanuvchilar: {S.user_count()}\n"
+            f"🎮 Faol o'yinlar: {len(manager.games)}\n"
+            f"🏁 Yakunlangan o'yinlar: {S.game_count()}\n"
+            f"📌 Majburiy kanal: {S.required_channel() or 'o‘rnatilmagan'}",
+        )
+    elif data == "admin_broadcast":
+        tg.answer_callback(cq_id)
+        admin_state[user_id] = "broadcast"
+        tg.send_message(chat_id, "Barcha foydalanuvchilarga yuboriladigan xabarni yozing:")
+    elif data == "admin_channel":
+        tg.answer_callback(cq_id)
+        admin_state[user_id] = "channel"
+        tg.send_message(
+            chat_id,
+            "Kanal username'ini yuboring (masalan @mening_kanalim).\n"
+            "O'chirish uchun \"yo'q\" deb yozing.",
+        )
+    elif data == "admin_games":
+        tg.answer_callback(cq_id)
+        if not manager.games:
+            tg.send_message(chat_id, "Hozir faol o'yin yo'q.")
+        else:
+            lines = [
+                f"Chat {cid}: {len(g.players)} o'yinchi, holat: {g.phase}"
+                for cid, g in manager.games.items()
+            ]
+            tg.send_message(chat_id, "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +294,24 @@ def handle_message(msg):
     chat = msg["chat"]
     user = msg["from"]
 
+    if chat["type"] == "private":
+        S.touch_user(user["id"], user.get("first_name", ""), user.get("username", ""))
+
+    # admin holati kutayotgan matn (broadcast/kanal) — boshqa hamma narsadan oldin
+    if chat["type"] == "private" and S.is_admin(user["id"]) and user["id"] in admin_state \
+            and not text.startswith("/"):
+        if handle_admin_text(user["id"], chat["id"], text):
+            return
+
+    if text.startswith("/admin") and chat["type"] == "private":
+        if S.is_admin(user["id"]):
+            handle_admin_command(chat["id"])
+        return
+
     if text.startswith("/mafia") and chat["type"] in ("group", "supergroup"):
+        if not is_subscribed(user["id"]):
+            send_subscribe_prompt(chat["id"])
+            return
         with lock:
             if manager.get(chat["id"]):
                 tg.send_message(chat["id"], "Bu guruhda allaqachon o'yin boshlangan.")
@@ -197,6 +325,9 @@ def handle_message(msg):
             reply_markup=lobby_keyboard(),
         )
     elif text.startswith("/start") and chat["type"] == "private":
+        if not is_subscribed(user["id"]):
+            send_subscribe_prompt(chat["id"])
+            return
         tg.send_message(
             chat["id"],
             "👋 Salom! Bu bot orqali guruhingizda Mafiya o'yinini o'ynashingiz mumkin.\n"
@@ -210,6 +341,24 @@ def handle_callback(cb):
     message = cb.get("message", {})
     chat_id = message.get("chat", {}).get("id")
     cq_id = cb["id"]
+
+    if chat_id and message.get("chat", {}).get("type") == "private":
+        S.touch_user(user["id"], user.get("first_name", ""), user.get("username", ""))
+
+    if data == "check_sub":
+        if is_subscribed(user["id"]):
+            tg.answer_callback(cq_id, "Rahmat! Endi botdan foydalanishingiz mumkin.")
+            tg.send_message(chat_id, "✅ Obuna tasdiqlandi. Guruhda /mafia deb yozing yoki shu yerda /start bosing.")
+        else:
+            tg.answer_callback(cq_id, "Hali obuna bo'lmadingiz.", show_alert=True)
+        return
+
+    if data.startswith("admin_"):
+        if S.is_admin(user["id"]):
+            handle_admin_callback(cq_id, user["id"], chat_id, data)
+        else:
+            tg.answer_callback(cq_id, "Ruxsat yo'q.")
+        return
 
     if data == "join":
         with lock:
