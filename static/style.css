@@ -1,0 +1,170 @@
+:root {
+  --bg: #14161c;
+  --panel: #1c1f28;
+  --panel-2: #23273143;
+  --brass: #c9a35c;
+  --blood: #b5312f;
+  --ink: #e8e4da;
+  --muted: #8b8d97;
+  --mafia: #b5312f;
+  --doctor: #4f9f8a;
+  --detective: #c9a35c;
+  --civilian: #6c7280;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 50% 15%, #24283350 0%, transparent 60%),
+    var(--bg);
+  color: var(--ink);
+  font-family: 'Inter', sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.scene {
+  width: 100%;
+  max-width: 360px;
+  text-align: center;
+}
+
+.brand {
+  font-family: 'Playfair Display', serif;
+  font-weight: 700;
+  font-size: 28px;
+  letter-spacing: 0.5px;
+  color: var(--brass);
+  margin-bottom: 28px;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.6;
+  margin-top: 40px;
+}
+
+.hidden { display: none; }
+
+/* --- Card flip --- */
+.card {
+  perspective: 1200px;
+  height: 220px;
+  cursor: pointer;
+}
+
+.card-face {
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  backface-visibility: hidden;
+  transition: transform 0.7s cubic-bezier(.2,.8,.2,1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.card-back {
+  background: linear-gradient(160deg, var(--panel), #171a22);
+  border: 1px solid #2c3040;
+  transform: rotateY(0deg);
+}
+
+.card-mark {
+  font-family: 'Playfair Display', serif;
+  font-size: 52px;
+  color: var(--brass);
+  opacity: 0.5;
+}
+
+.card-hint {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.card-front {
+  background: linear-gradient(160deg, var(--panel), #171a22);
+  border: 1px solid var(--brass);
+  transform: rotateY(180deg);
+}
+
+.card.flipped .card-back { transform: rotateY(-180deg); }
+.card.flipped .card-front { transform: rotateY(0deg); }
+
+.role-name {
+  font-family: 'Playfair Display', serif;
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.role-desc {
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.phase {
+  margin-top: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  min-height: 18px;
+}
+
+/* --- Voice --- */
+.voice-box {
+  margin-top: 28px;
+  background: var(--panel);
+  border: 1px solid #2c3040;
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.voice-btn {
+  width: 100%;
+  border: none;
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
+  background: var(--blood);
+  color: var(--ink);
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+.voice-btn.active {
+  background: #2c3040;
+  color: var(--brass);
+}
+
+.voice-btn:active { opacity: 0.8; }
+
+.peers {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+  min-height: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.peer-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--brass);
+  display: inline-block;
+}
