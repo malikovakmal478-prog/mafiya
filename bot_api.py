@@ -12,7 +12,10 @@ API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 def _call(method, **params):
     try:
-        r = requests.post(f"{API_URL}/{method}", json=params, timeout=10)
+        # None qiymatli parametrlarni tozalab tashlaymiz (Telegram API 'null' qiymatlarni xato beradi)
+        clean_params = {k: v for k, v in params.items() if v is not None}
+        
+        r = requests.post(f"{API_URL}/{method}", json=clean_params, timeout=10)
         data = r.json()
         if not data.get("ok"):
             print(f"[TG API XATO] {method}: {data}")
