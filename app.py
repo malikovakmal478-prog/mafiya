@@ -158,6 +158,23 @@ def handle_admin_callback(cq_id, user_id, chat_id, data):
 # ---------------------------------------------------------------------------
 # Klaviaturalar
 # ---------------------------------------------------------------------------
+def start_menu_keyboard():
+    rows = []
+    if BOT_USERNAME:
+        rows.append([tg.button(
+            "➕ O'yinni guruhingizga qo'shing",
+            url=f"https://t.me/{BOT_USERNAME}?startgroup=true",
+        )])
+    rows.append([
+        tg.button("🎭 Rollar", callback_data="show_roles"),
+        tg.button("📖 Qoidalar", callback_data="show_rules"),
+    ])
+    if S.required_channel():
+        handle = S.required_channel().lstrip("@")
+        rows.append([tg.button("📰 Yangiliklar", url=f"https://t.me/{handle}")])
+    return tg.kb(rows)
+
+
 def lobby_keyboard():
     rows = [[tg.button("✅ Qo'shilish", callback_data="join")]]
     if WEBAPP_URL:
@@ -330,9 +347,14 @@ def handle_message(msg):
             return
         tg.send_message(
             chat["id"],
-            "👋 Salom! Bu bot orqali guruhingizda Mafiya o'yinini o'ynashingiz mumkin.\n"
-            "Guruhda <code>/mafia</code> buyrug'ini yozing va lobbyga qo'shiling.",
+            "👋 <b>Mafiya olamiga xush kelibsiz!</b>\n\n"
+            "Sirli jamoa, yangi dunyo — o'yinga kir, rolingni ol, o'zingni ko'rsat!\n"
+            "Guruhingizda o'ynash uchun pastdagi tugma orqali botni qo'shing.",
+            reply_markup=start_menu_keyboard(),
         )
+    elif text.startswith("/start") and chat["type"] in ("group", "supergroup"):
+        # /start guruhga botni qo'shganda ham /mafia bilan bir xil ishlasin
+        handle_message({**msg, "text": "/mafia"})
 
 
 def handle_callback(cb):
@@ -344,6 +366,25 @@ def handle_callback(cb):
 
     if chat_id and message.get("chat", {}).get("type") == "private":
         S.touch_user(user["id"], user.get("first_name", ""), user.get("username", ""))
+
+    if data == "show_roles":
+        tg.answer_callback(cq_id)
+        text = "\n\n".join(f"{name}\n{G.ROLE_DESC[key]}" for key, name in G.ROLE_NAMES.items())
+        tg.send_message(chat_id, f"🎭 <b>Rollar</b>\n\n{text}")
+        return
+
+    if data == "show_rules":
+        tg.answer_callback(cq_id)
+        tg.send_message(
+            chat_id,
+            "📖 <b>Qoidalar</b>\n\n"
+            "1. Guruhda /mafia yozib lobby oching, kamida 4 kishi qo'shilsin.\n"
+            "2. Admin \"Boshlash\"ni bosgach, har biringizga shaxsiy xabarda rolingiz keladi.\n"
+            "3. Har kecha Mafiya birini yo'q qiladi, Doktor birini qutqaradi, Detektiv birini tekshiradi.\n"
+            "4. Kunduzi hammasi muhokama qilib, gumon qilinganga ovoz beradi.\n"
+            "5. Mafiya tugasa — tinch aholi yutadi. Mafiya sonini tenglashtirsa — mafiya yutadi.",
+        )
+        return
 
     if data == "check_sub":
         if is_subscribed(user["id"]):
