@@ -13,6 +13,8 @@ ROLE_NAMES = {
     "mafia": "🔫 Mafiya",
     "doctor": "💉 Doktor",
     "detective": "🕵️ Detektiv",
+    "mayor": "🎖 Mer",
+    "maniac": "🔪 Yakka Qotil",
     "civilian": "👤 Tinch aholi",
 }
 
@@ -20,6 +22,9 @@ ROLE_DESC = {
     "mafia": "Har kecha bitta odamni yo'q qilasan. Kunduzi o'zingni tinch aholidek tut.",
     "doctor": "Har kecha bitta odamni (o'zingni ham) o'limdan qutqarasan.",
     "detective": "Har kecha bitta odamni tekshirib, u mafiyami-yo'qmi bilib olasan.",
+    "mayor": "Tinch aholi tomonidasan. Kunduzi ovoz berganingda ovozing 2 kishilik hisoblanadi.",
+    "maniac": "Hech kim tomonida emassan — o'zing uchun o'ynaysan. Har kecha birini yo'q qilasan. "
+              "Faqat SEN tirik qolsang — yutasan.",
     "civilian": "Maxsus kuching yo'q. Kunduzi gaplashib, mafiyani top va ovoz ber.",
 }
 
@@ -60,6 +65,10 @@ def role_distribution(n):
         roles.append("doctor")
     if n >= 5:
         roles.append("detective")
+    if n >= 6:
+        roles.append("mayor")
+    if n >= 7:
+        roles.append("maniac")
     while len(roles) < n:
         roles.append("civilian")
     random.shuffle(roles)
@@ -104,7 +113,7 @@ class Game:
     def player_list_text(self):
         if not self.players:
             return "Hali hech kim qo'shilmadi."
-        return "\n".join(f"• {p.name}" for p in self.players.values())
+        return "\n".join(f"{i}. {p.name}" for i, p in enumerate(self.players.values(), 1))
 
     def can_start(self):
         return len(self.players) >= Game.MIN_PLAYERS
@@ -132,25 +141,34 @@ class Game:
 
     def night_ready(self):
         """Barcha tirik maxsus rollar tanlov qildimi?"""
-        for role in ("mafia", "doctor", "detective"):
+        for role in ("mafia", "doctor", "detective", "maniac"):
             actors = self.players_by_role(role)
             if actors and len(self.night_actions.get(role, {})) < len(actors):
                 return False
         return True
 
     def resolve_night(self):
-        mafia_targets = list(self.night_actions.get("mafia", {}).values())
-        killed = None
-        if mafia_targets:
-            # eng ko'p ovoz olgan nishon
-            killed = max(set(mafia_targets), key=mafia_targets.count)
-
         saved_ids = set(self.night_actions.get("doctor", {}).values())
-        if killed in saved_ids:
-            killed = None
 
-        if killed and killed in self.players:
-            self.players[killed].alive = False
+        def top_target(role):
+            targets = list(self.night_actions.get(role, {}).values())
+            if not targets:
+                return None
+            return max(set(targets), key=targets.count)
+
+        killed_ids = set()
+        mafia_target = top_target("mafia")
+        if mafia_target and mafia_target not in saved_ids:
+            killed_ids.add(mafia_target)
+        maniac_target = top_target("maniac")
+        if maniac_target and maniac_target not in saved_ids:
+            killed_ids.add(maniac_target)
+
+        killed_players = []
+        for pid in killed_ids:
+            if pid in self.players and self.players[pid].alive:
+                self.players[pid].alive = False
+                killed_players.append(self.players[pid])
 
         detective_results = {}
         for actor_id, target_id in self.night_actions.get("detective", {}).items():
@@ -160,8 +178,7 @@ class Game:
 
         self.night_actions = {}
         self.phase = Game.DAY
-        self.last_night_result = killed
-        return killed, detective_results
+        return killed_players, detective_results
 
     # ---------- voting ----------
     def record_vote(self, voter_id, target_id):
@@ -174,7 +191,11 @@ class Game:
         if not self.votes:
             self.votes = {}
             return None
-        tally = list(self.votes.values())
+        tally = []
+        for voter_id, target_id in self.votes.items():
+            voter = self.players.get(voter_id)
+            weight = 2 if voter and voter.role == "mayor" else 1
+            tally.extend([target_id] * weight)
         eliminated_id = max(set(tally), key=tally.count)
         if eliminated_id in self.players:
             self.players[eliminated_id].alive = False
@@ -186,12 +207,17 @@ class Game:
     # ---------- win check ----------
     def check_winner(self):
         alive = self.alive_players()
+        maniac = [p for p in alive if p.role == "maniac"]
+
+        if maniac and len(alive) == 1:
+            return "maniac"
+
         mafia = [p for p in alive if p.role == "mafia"]
         others = [p for p in alive if p.role != "mafia"]
         if not mafia:
-            return "civilians"
+            return None if maniac else "civilians"
         if len(mafia) >= len(others):
-            return "mafia"
+            return None if maniac else "mafia"
         return None
 
 
