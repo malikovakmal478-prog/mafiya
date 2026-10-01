@@ -21,6 +21,9 @@ NIGHT_SECONDS = int(os.environ.get("NIGHT_SECONDS", 45))
 VOTE_SECONDS = int(os.environ.get("VOTE_SECONDS", 45))
 
 app = Flask(__name__)
+# "threading" rejimi eventlet'siz ishlaydi — Render'ning yangi Python
+# versiyalarida eventlet buziladigan muammolardan xoli, qo'shimcha
+# kutubxona ham kerak emas.
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 manager = G.GameManager()
@@ -28,6 +31,10 @@ lock = threading.Lock()
 admin_state = {}  # admin_user_id -> "broadcast" | "channel"
 
 
+# ---------------------------------------------------------------------------
+# Telegram WebApp initData tekshiruvi (soxta so'rovlarni bloklaydi)
+# https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+# ---------------------------------------------------------------------------
 def validate_init_data(init_data: str):
     try:
         pairs = dict(parse_qsl(init_data, strict_parsing=True))
@@ -42,13 +49,16 @@ def validate_init_data(init_data: str):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Majburiy obuna
+# ---------------------------------------------------------------------------
 def is_subscribed(user_id):
     channel = S.required_channel()
     if not channel:
         return True
     data = tg.get_chat_member(channel, user_id)
     if not data.get("ok"):
-        return True
+        return True  # bot kanalda admin emas yoki xato — foydalanuvchini bloklamaymiz
     status = data["result"].get("status")
     return status in ("creator", "administrator", "member")
 
@@ -67,6 +77,9 @@ def send_subscribe_prompt(chat_id):
     )
 
 
+# ---------------------------------------------------------------------------
+# Admin panel
+# ---------------------------------------------------------------------------
 def admin_menu_keyboard():
     return tg.kb([
         [tg.button("📊 Statistika", callback_data="admin_stats")],
@@ -81,6 +94,7 @@ def handle_admin_command(chat_id):
 
 
 def handle_admin_text(user_id, chat_id, text):
+    """Admin broadcast yoki kanal nomini matn sifatida yuborganda ishlaydi."""
     state = admin_state.get(user_id)
     if state == "broadcast":
         admin_state.pop(user_id, None)
@@ -92,7 +106,7 @@ def handle_admin_text(user_id, chat_id, text):
                 sent += 1
             else:
                 failed += 1
-            time.sleep(0.05)
+            time.sleep(0.05)  # Telegram flood-limitiga tegmaslik uchun
         tg.send_message(chat_id, f"✅ Yuborildi: {sent} ta\n❌ Yetmadi: {failed} ta")
         return True
     if state == "channel":
@@ -141,6 +155,9 @@ def handle_admin_callback(cq_id, user_id, chat_id, data):
             tg.send_message(chat_id, "\n".join(lines))
 
 
+# ---------------------------------------------------------------------------
+# Klaviaturalar
+# ---------------------------------------------------------------------------
 def start_menu_keyboard():
     rows = []
     if BOT_USERNAME:
@@ -152,6 +169,12 @@ def start_menu_keyboard():
         tg.button("🎭 Rollar", callback_data="show_roles"),
         tg.button("📖 Qoidalar", callback_data="show_rules"),
     ])
+    rows.append([
+        tg.button("📊 Profilim", callback_data="show_profile"),
+        tg.button("🏆 Reyting", callback_data="show_top"),
+    ])
+    if WEBAPP_URL:
+        rows.append([tg.button("🎮 Mini App'ni ochish", web_app_url=WEBAPP_URL)])
     rows.append([tg.button("💎 Pro guruhlar", callback_data="pro_soon")])
     if S.required_channel():
         handle = S.required_channel().lstrip("@")
@@ -176,6 +199,9 @@ def targets_keyboard(action, alive_players, exclude_id=None):
     return tg.kb(rows)
 
 
+# ---------------------------------------------------------------------------
+# O'yin oqimi
+# ---------------------------------------------------------------------------
 def start_night(gm: G.Game):
     gm.phase = G.Game.NIGHT
     gm.night_actions = {}
@@ -184,7 +210,10 @@ def start_night(gm: G.Game):
         f"🌙 <b>{gm.round}-kecha tushdi.</b> Shahar uxlamoqda...\n"
         f"Maxsus rollar shaxsiy xabarlarida harakat qilyapti. ⏳ {NIGHT_SECONDS} soniya.",
     )
-    for role in ("mafia", "doctor", "detective", "maniac"):
+    for p in gm.alive_players():
+        tg.restrict_member(gm.chat_id, p.user_id, can_send=False)
+
+    for role in ("mafia", "doctor", "detective", "maniac", "bodyguard"):
         actors = gm.players_by_role(role)
         alive = gm.alive_players()
         for actor in actors:
@@ -193,12 +222,13 @@ def start_night(gm: G.Game):
                 "doctor": "💉 Kimni davolaymiz?",
                 "detective": "🕵️ Kimni tekshiramiz?",
                 "maniac": "🔪 Kimni yo'q qilasan? (Bu faqat sen bilasan)",
+                "bodyguard": "🛡 Kimni himoya qilasan?",
             }[role]
             tg.send_message(
                 actor.user_id,
                 verb,
                 reply_markup=targets_keyboard(f"night_{role}", alive,
-                                               exclude_id=actor.user_id if role != "doctor" else None),
+                                               exclude_id=actor.user_id if role not in ("doctor", "bodyguard") else None),
             )
     threading.Timer(NIGHT_SECONDS, lambda: resolve_night_safe(gm.chat_id)).start()
 
@@ -231,6 +261,8 @@ def start_voting(gm: G.Game):
     gm.phase = G.Game.VOTING
     gm.votes = {}
     alive = gm.alive_players()
+    for p in alive:
+        tg.restrict_member(gm.chat_id, p.user_id, can_send=True)
     names = ", ".join(p.name for p in alive)
     tg.send_message(
         gm.chat_id,
@@ -266,18 +298,43 @@ def resolve_vote_safe(chat_id):
 
 def finish_game(gm: G.Game, winner):
     gm.phase = G.Game.FINISHED
+
+    for p in gm.players.values():
+        tg.restrict_member(gm.chat_id, p.user_id, can_send=True)
+
+    jester_name = getattr(gm, "jester_winner_id", None) and gm.players[gm.jester_winner_id].name
     texts = {
         "civilians": "🏆 <b>Tinch aholi g'alaba qozondi!</b>",
         "mafia": "🏆 <b>Mafiya g'alaba qozondi!</b>",
         "maniac": "🏆 <b>Yakka Qotil g'alaba qozondi!</b> U yolg'iz qoldi.",
+        "jester": f"🏆 <b>Masxaraboz g'alaba qozondi!</b> {jester_name} hammani aldab, "
+                  f"o'zini chetlatishga majbur qildi!",
     }
     text = texts.get(winner, "🏆 <b>O'yin tugadi.</b>")
     reveal = "\n".join(f"{p.name} — {G.ROLE_NAMES[p.role]}" for p in gm.players.values())
     tg.send_message(gm.chat_id, f"{text}\n\nBarcha rollar:\n{reveal}")
     G.log_result(gm.chat_id, winner, len(gm.players))
+
+    town_roles = ("doctor", "detective", "mayor", "bodyguard", "civilian")
+    for p in gm.players.values():
+        if winner == "jester":
+            won = getattr(gm, "jester_winner_id", None) == p.user_id
+        elif winner == "maniac":
+            won = p.role == "maniac"
+        elif winner == "mafia":
+            won = p.role == "mafia"
+        elif winner == "civilians":
+            won = p.role in town_roles
+        else:
+            won = False
+        S.record_game_result(p.user_id, p.name, won)
+
     manager.end(gm.chat_id)
 
 
+# ---------------------------------------------------------------------------
+# Telegram webhook
+# ---------------------------------------------------------------------------
 @app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
 def webhook():
     update = request.get_json(force=True, silent=True) or {}
@@ -299,6 +356,7 @@ def handle_message(msg):
     if chat["type"] == "private":
         S.touch_user(user["id"], user.get("first_name", ""), user.get("username", ""))
 
+    # admin holati kutayotgan matn (broadcast/kanal) — boshqa hamma narsadan oldin
     if chat["type"] == "private" and S.is_admin(user["id"]) and user["id"] in admin_state \
             and not text.startswith("/"):
         if handle_admin_text(user["id"], chat["id"], text):
@@ -307,6 +365,34 @@ def handle_message(msg):
     if text.startswith("/admin") and chat["type"] == "private":
         if S.is_admin(user["id"]):
             handle_admin_command(chat["id"])
+        return
+
+    if text.startswith("/profile"):
+        row = S.get_profile(user["id"])
+        if not row:
+            tg.send_message(chat["id"], "Siz hali birorta o'yinni yakunlamagansiz.")
+        else:
+            name, played, won = row
+            winrate = round(won / played * 100) if played else 0
+            tg.send_message(
+                chat["id"],
+                f"📊 <b>{name}ning statistikasi</b>\n"
+                f"🎮 O'yinlar: {played}\n"
+                f"🏆 G'alabalar: {won}\n"
+                f"📈 G'alaba foizi: {winrate}%",
+            )
+        return
+
+    if text.startswith("/top"):
+        rows = S.top_players(10)
+        if not rows:
+            tg.send_message(chat["id"], "Hali reytingda hech kim yo'q.")
+        else:
+            lines = [
+                f"{i}. {name} — {won} g'alaba ({played} o'yin)"
+                for i, (name, played, won) in enumerate(rows, 1)
+            ]
+            tg.send_message(chat["id"], "🏆 <b>Eng zo'r o'yinchilar</b>\n\n" + "\n".join(lines))
         return
 
     if text.startswith("/mafia") and chat["type"] in ("group", "supergroup"):
@@ -339,6 +425,7 @@ def handle_message(msg):
             reply_markup=start_menu_keyboard(),
         )
     elif text.startswith("/start") and chat["type"] in ("group", "supergroup"):
+        # /start guruhga botni qo'shganda ham /mafia bilan bir xil ishlasin
         handle_message({**msg, "text": "/mafia"})
 
 
@@ -369,6 +456,36 @@ def handle_callback(cb):
             "4. Kunduzi hammasi muhokama qilib, gumon qilinganga ovoz beradi.\n"
             "5. Mafiya tugasa — tinch aholi yutadi. Mafiya sonini tenglashtirsa — mafiya yutadi.",
         )
+        return
+
+    if data == "show_profile":
+        tg.answer_callback(cq_id)
+        row = S.get_profile(user["id"])
+        if not row:
+            tg.send_message(chat_id, "Siz hali birorta o'yinni yakunlamagansiz.")
+        else:
+            name, played, won = row
+            winrate = round(won / played * 100) if played else 0
+            tg.send_message(
+                chat_id,
+                f"📊 <b>{name}ning statistikasi</b>\n"
+                f"🎮 O'yinlar: {played}\n"
+                f"🏆 G'alabalar: {won}\n"
+                f"📈 G'alaba foizi: {winrate}%",
+            )
+        return
+
+    if data == "show_top":
+        tg.answer_callback(cq_id)
+        rows = S.top_players(10)
+        if not rows:
+            tg.send_message(chat_id, "Hali reytingda hech kim yo'q.")
+        else:
+            lines = [
+                f"{i}. {name} — {won} g'alaba ({played} o'yin)"
+                for i, (name, played, won) in enumerate(rows, 1)
+            ]
+            tg.send_message(chat_id, "🏆 <b>Eng zo'r o'yinchilar</b>\n\n" + "\n".join(lines))
         return
 
     if data == "pro_soon":
@@ -463,12 +580,16 @@ def handle_callback(cb):
 
 
 def find_game_by_actor(user_id):
+    """Shaxsiy chatdan kelgan tugma bosilganda, o'sha odam qaysi o'yinda ekanini topadi."""
     for gm in manager.games.values():
         if user_id in gm.players:
             return gm
     return None
 
 
+# ---------------------------------------------------------------------------
+# Mini App (rol ko'rsatish sahifasi + ovozli xona)
+# ---------------------------------------------------------------------------
 @app.route("/app")
 def miniapp():
     return render_template("index.html")
@@ -495,7 +616,12 @@ def api_me():
     )
 
 
-voice_rooms = {}
+# ---------------------------------------------------------------------------
+# WebRTC ovozli chat uchun signalling (media serversiz, brauzer-brauzer mesh).
+# Har bir mijoz o'z sid'i nomli xonaga avtomatik qo'shiladi, shuning uchun
+# signalni aniq bitta odamga "target" orqali yo'naltirish mumkin.
+# ---------------------------------------------------------------------------
+voice_rooms = {}  # room -> set(sid)
 
 
 @socketio.on("join_voice")
@@ -510,6 +636,7 @@ def on_join_voice(data):
 
 @socketio.on("signal")
 def on_signal(data):
+    # data: {target, from, type, sdp/candidate}
     data["from"] = request.sid
     emit("signal", data, room=data.get("target"))
 
